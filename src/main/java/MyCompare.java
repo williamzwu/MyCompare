@@ -1,0 +1,391 @@
+
+import com.sun.org.apache.xalan.internal.xsltc.cmdline.getopt.GetOpt;
+import com.sun.org.apache.xalan.internal.xsltc.cmdline.getopt.GetOptsException;
+// This uses an internal package which may be discontinued in the future.
+// A public version is in https://alvinalexander.com/java/jwarehouse/netbeans-src/javacvs/libsrc/org/netbeans/lib/cvsclient/commandLine/GetOpt.java.shtml
+
+import java.io.File;  // Import the File class
+import java.io.FileNotFoundException;  // Import this class to handle errors
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.io.UnsupportedEncodingException;
+import java.nio.charset.Charset;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.Scanner; // Import the Scanner class to read text files
+//import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
+import static javax.xml.bind.DatatypeConverter.printHexBinary;
+
+public class MyCompare {
+    private PrintStream result; // target
+    private PrintStream trace; // target
+    private SearchEngine library; // target
+    private String topDirectory; // target
+    private SearchEngine sourceLibrary; // readonly
+    private String filterFile;
+    private Hash hash;
+    private String stamp;
+    private int numberOfPast;
+    private int numberOfChanges;
+    private static String standardTraceName = "-trace-";
+    private static String standardLibraryName = "-library-";
+    private static String standardSolutionName = "-trace-solution-";
+    private File standardFile( String top, String filetype )
+    {
+        File standardName = new File(top, "." + hash.getName() + filetype + stamp + ".txt");
+        return standardName;
+    }
+
+    private File standardTrace( String top )
+    {
+        return standardFile( top, standardTraceName );
+    }
+
+    private File standardLibrary( String top )
+    {
+        return standardFile( top, standardLibraryName );
+    }
+
+    private File standardSolution( String top ) { return standardFile( top, standardSolutionName ); }
+
+    private boolean isStandardLibrary( String name )
+    {
+        return name.startsWith( "." + hash.getName() + standardLibraryName );
+    }
+
+    MyCompare( String _topDirectory, String _filterFile, Hash _hash )
+    {
+        filterFile = _filterFile;
+        topDirectory = _topDirectory;
+        hash = _hash;
+        numberOfPast = numberOfChanges = 0;
+        java.text.DateFormat dateFormat = new SimpleDateFormat("yyyyMMdd-HHmmss");
+        Date date = new Date();
+        stamp = dateFormat.format(date);
+        try {
+            trace = new PrintStream(standardTrace(topDirectory));
+//            trace = new PrintStream( new FileOutputStream(standardTrace(topDirectory)), true, "UTF-8" );
+            Charset cs = Charset.defaultCharset();
+            String defaultEncoding = System.getProperty("file.encoding");
+            if( trace != null && defaultEncoding != null) trace.println("file.encoding="+defaultEncoding);
+            if( trace != null && filterFile != null) trace.println("filter="+filterFile);
+            if( ! defaultEncoding.equalsIgnoreCase("UTF-8"))
+                trace.println("Default encoding is "+defaultEncoding+". If you expect file names in non-English, please set it to UTF-8.");
+        } catch (FileNotFoundException e) {
+            System.out.println(e.getMessage());
+            e.printStackTrace();
+            /*
+        } catch (UnsupportedEncodingException e) {
+            Sytem.out.println(e.getMessage()); */
+        } finally {
+        }
+    }
+
+    private SearchEngine loadChecksum(String directory )
+    {
+        SearchEngine newLibrary = null;
+        File top = new File( directory );
+        File[] list = top.listFiles();
+
+        if( list==null ) {
+            if( trace != null ) trace.println("Directory Not Readable: " + top.getAbsolutePath());
+            return null;
+        }
+        long timestamp = 0;
+        File past = null;
+        for( int k=0; list != null && k<list.length; ++k ) {
+            String childName = list[k].getName();
+              if( isStandardLibrary(childName) ) {
+                long thisTimeStamp = list[k].lastModified();
+                if( thisTimeStamp > timestamp ) {
+                    timestamp = thisTimeStamp;
+                    past = list[k];
+                }
+            }
+        }
+        if( past==null ) {
+            if( trace != null ) trace.println("--- Has not found any earlier checksum library. ");
+            return null;
+        }
+        try {
+            if( trace != null ) trace.print("--- Found an earlier checksum library : "+past.getAbsolutePath());
+            Scanner pastResult = new Scanner(past);
+//            Scanner pastResult = new Scanner(past, "UTF-8");
+            newLibrary = new SearchEngine(null, directory, File.separator );
+            newLibrary.loadFromFile(pastResult);
+            pastResult.close();
+            if( trace != null ) trace.println(", number of files : "+ newLibrary.numberOfFiles());
+        } catch (FileNotFoundException e) {
+            System.err.println("Cannot find file "+ past.getAbsolutePath());
+        }
+        return newLibrary;
+    }
+
+    void loadSourceChecksum(String sourceDirectory)
+    {
+        library = loadChecksum( sourceDirectory );
+    }
+
+    public void decendFolder(Hash hash, FileFilter filter, File file, int level, SearchEngine pastLibrary, SearchEngine resultLibrary ) throws Exception
+    {
+        if( file.exists() && file.isFile() )
+        {
+            if( file.canRead() && file.exists() && ! file.isHidden() ) {
+                try {
+                    FileRecord rec = null;
+                    String tailPath = FileRecord.getTailPath(file.getAbsolutePath(), topDirectory, library.separator);
+                    /*
+                    byte[] bs = tailPath.getBytes();
+                    if( bs.length != tailPath.length()) {
+                        trace.print(bs.length + "=");
+                        trace.write(bs);
+                        trace.print("=" + tailPath.length() + "=");
+                        trace.printf(Locale.CHINESE, tailPath);
+                        trace.println();
+                    }*/
+
+                    if( pastLibrary != null ) {
+                        rec = (null==tailPath?null:pastLibrary.findByTailPath(tailPath));
+                        if (null != rec && file.length() == rec.size && file.lastModified()==rec.lastModifiedDate) {
+                            numberOfPast++; // use this record and don't calculate checkcum again.
+                        } else {
+                            rec = null; // ignore this past record and calculate checksum again.
+                        }
+                    }
+                    if( null==rec ) {
+                        numberOfChanges++;
+                        rec = new FileRecord(file.length(), file.lastModified(), hash.getName(), printHexBinary(Hash.SHA256.checksum(file)), tailPath, 1);
+//                        if( numberOfChanges<10 ) System.out.println(rec.toString(topDirectory));
+                    }
+                    resultLibrary.add(rec);
+                } catch ( java.io.FileNotFoundException e ) {
+                    if( trace != null) trace.println("Access is denied: " + file.getAbsolutePath() );
+                } catch ( Exception e ) {
+                    if( e.getCause().getMessage().startsWith("java.io")) {
+                        if (trace != null)
+                            trace.println("Cannot read file: " + file.getAbsolutePath());
+                    } else
+                        throw(e);
+                }
+            } else {
+                if (trace != null && ! file.canRead() ) trace.println("File Not readable: " + file.getAbsolutePath());
+                if (trace != null && ! file.exists() ) trace.println("File does not exist: " + file.getAbsolutePath());
+                if (trace != null && file.isHidden() ) trace.println("File is hidden: " + file.getAbsolutePath());
+            }
+        } else if( file.exists() && file.isDirectory() )
+        {
+            File[] list = file.listFiles();
+            if( list==null && trace != null )
+                trace.println( "Directory Not Readable: " + file.getAbsolutePath() );
+            for( int k=0; list != null && k<list.length; ++k ) {
+                if( null==filter || filter.accept(list[k].getParentFile(), list[k].getName()) )
+                    decendFolder(hash, filter, list[k], level + 1, pastLibrary, resultLibrary);
+                else
+                    if( trace != null ) trace.println( "Ignored: " + list[k].getAbsolutePath() );
+            }
+        }
+    }
+    public void report()
+    {
+        if( null != trace ) trace.println("--- Loaded "+numberOfPast+" file checksum from the past library.");
+        if( null != trace ) trace.println("--- Calculated "+numberOfChanges+" file checksum.");
+        library.reportStatus(trace);
+    }
+    void decend(String pastDirectory)
+    {
+        SearchEngine pastLibrary = (null==pastDirectory?null:loadChecksum(pastDirectory));
+        FileFilter filter = (null==filterFile ? null : new FileFilter(filterFile));
+        File top = new File( topDirectory );
+        try {
+            result = new PrintStream( standardLibrary(topDirectory));
+//            result = new PrintStream( new FileOutputStream(standardLibrary(topDirectory)), true, "UTF-8" );
+            library = new SearchEngine(result, topDirectory, File.separator);
+            decendFolder(hash, filter, top, 0, pastLibrary, library);
+            report();
+            if (result != null) result.close();
+            if (trace != null) trace.close();
+        } catch (Exception e) {
+            System.out.println( e.getMessage() );
+            e.printStackTrace();
+        } finally {
+        }
+    }
+
+    void extract(String sourceDirectory)
+    {
+        SearchEngine sourceLibrary = (null==sourceDirectory?null:loadChecksum(sourceDirectory));
+
+        FileFilter filter = (null==filterFile ? null : new FileFilter(filterFile));
+        File top = new File( topDirectory );
+        try {
+            result = new PrintStream( standardLibrary(topDirectory) );
+            library = new SearchEngine(result, topDirectory,File.separator);
+            numberOfPast = library.extract(sourceLibrary);
+            report();
+            if (result != null) result.close();
+            if (trace != null) trace.close();
+        } catch (Exception e) {
+            System.out.println( e.getMessage() );
+            e.printStackTrace();
+        } finally {
+        }
+    }
+
+    void archive(String sourceDirectory)
+    {
+        SearchEngine masterLibrary = (null==sourceDirectory?null:loadChecksum(sourceDirectory));
+        SearchEngine archiveLibrary = (null==topDirectory?null:loadChecksum(topDirectory));
+        FileFilter filter = (null==filterFile ? null : new FileFilter(filterFile));
+        File top = new File( topDirectory );
+        try {
+            PrintStream solution = new PrintStream( standardSolution(archiveLibrary.topDirectory) );
+            archiveLibrary.findUpdate(masterLibrary, solution);
+//            report();
+            if (solution != null) solution.close();
+            if (trace != null) trace.close();
+        } catch (Exception e) {
+            System.out.println( e.getMessage() );
+            e.printStackTrace();
+        } finally {
+        }
+    }
+
+    // This variable should be set to false to prevent any methods in this
+    // class from calling System.exit(). As this is a command-line tool,
+    // calling System.exit() is normally OK, but we also want to allow for
+    // this class being used in other ways as well.
+    private static boolean _allowExit = true;
+
+    private static void printUsage()
+    {
+        System.out.println( "MyCompare, a JAVA program that calculates checksum for files and use them to compare archived files.");
+        System.out.println( "  Options:");
+        System.out.println( "  -c  Load old checksum results and calculate (-t) checksum for new or changed files.");
+        System.out.println( "  -r  ReCalculate checksum (-t) without loading old checksum results.");
+        System.out.println( "  -e  Extract checksum from old checksum results (-s) for a specified directory (-t)");
+        System.out.println( "  -s  Source top directory.");
+        System.out.println( "  -t  Target top directory.");
+    }
+
+    /*
+      Sample commands:
+
+      # calculate checksum from the files, if past checkcum result file is available and size and last modified date match,
+      #   do not calculate it again by copying the checksum from past.
+      -c -t "C:\Users\Public\Documents" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+      -t "C:\Users\Public\Documents" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+      -t "W:\\Archives" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+
+      # extract the new (target -t) top directory from a past (source -s) checksum result file. The new top directory is under the (past) source directory.
+      -e -s "C:\Users\Public\Documents" -t "C:\Users\Public\Documents\2011-11-11N.dup52" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+
+      # move a past (source -s) checksum to a higher directory (-t). The new top directory above the (past) source directory.
+      -m -s "C:\Users\Public\Documents\images" -t "C:\Users\Public\Documents" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+
+      # archive a directory (-s) to another (-t), with both checksum calculated already.
+      -a -s "C:\Users\Public\Documents\2011-11-11N.dup53" -t "C:\Users\Public\Documents\2011-11-11N.dup53 - Copy" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+
+      # recalculate checksum from the files, ignoring any past checksum results.
+      -r -t "C:\Users\Public\Documents" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+
+      # Test cases
+      -e -s "C:\Users\Public\Documents" -t "C:\Users\Public\Documents\2011-11-11N.dup52" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+      -c -t "C:\Users\Public\Documents\2011-11-11N.dup52" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+         -t "C:\Users\Public\Documents\2011-11-11N.dup52" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+      -r -t "C:\Users\Public\Documents\2011-11-11N.dup52" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+      -c -t "E:\MyUsrId-Storage\Archives" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+      -a -s "C:\Users\Public\Documents\2011-11-11N.dup53" -t "C:\Users\Public\Documents\2011-11-11N.dup53 - Copy" -f "C:\Users\myuid\Documents\Winmerge-user-exclude1.flt" -h SHA-256
+
+     */
+    public static void main(String[] args) {
+        Hash usedHash = Hash.SHA256;
+        boolean calculateNewChecksum = true; // using old checksum if available
+        boolean reCalculateChecksum = false; // ignore old checksum
+        boolean extractTopDirectory = false; // extract top directory from the calculated checksum, the source and the new (target) top directory are provided by -s and -t options.
+        boolean archiveTopDirectory = false; // archive the files from source (-s) top directory to target (-t) directory.
+        String sourceDirectory = null;
+        String filterFile = null;
+        String targetDirectory = null;
+
+        try {
+            final GetOpt opt = new GetOpt(args, "creas:f::t:h::?::");
+            int c;
+            String arg;
+            arg = System.getProperty("MyCompare.Hash");
+            if( arg != null ) {
+                usedHash = Hash.getByName(arg);
+            }
+            filterFile = System.getProperty("MyCompare.filter");
+
+            while ((c = opt.getNextOption()) != -1)
+            {
+                switch(c)
+                {
+                    case 's':
+                        sourceDirectory = opt.getOptionArg();
+                        break;
+                    case 'f':
+                        filterFile = opt.getOptionArg();
+                        break;
+                    case 'h':
+                        arg = opt.getOptionArg();
+                        usedHash = Hash.getByName(arg);
+                        break;
+                    case 't':
+                        targetDirectory = opt.getOptionArg();
+                        break;
+                    case 'c':
+                        calculateNewChecksum = true;
+                        reCalculateChecksum = extractTopDirectory = archiveTopDirectory = false;
+                        break;
+                    case 'r':
+                        reCalculateChecksum = true;
+                        calculateNewChecksum = extractTopDirectory = archiveTopDirectory = false;
+                        break;
+                    case 'e':
+                        extractTopDirectory = true;
+                        calculateNewChecksum = reCalculateChecksum = archiveTopDirectory = false;
+                        break;
+                    case 'a':
+                        archiveTopDirectory = true;
+                        calculateNewChecksum = reCalculateChecksum = extractTopDirectory = false;
+                        break;
+                    case '?':
+                        printUsage();
+                        break; // getopt() already printed an error
+                    default:
+                        System.out.print("getopt() returned " + c + " unexpected, exiting.\n");
+                        if (_allowExit) System.exit(-1);
+                }
+            }
+        } catch (GetOptsException ex) {
+            System.err.println(ex);
+            printUsage(); // exits with code '-1'
+        } catch (Exception e) {
+            e.printStackTrace();
+            if (_allowExit) System.exit(-1);
+        }
+        if( null==targetDirectory ) {
+            System.err.println("Target directory has to be specified. Use -t option.");
+            if (_allowExit) System.exit(-1);
+        }
+        MyCompare engine = new MyCompare( targetDirectory, filterFile, usedHash );
+        if( calculateNewChecksum ) {
+            sourceDirectory = null;
+            engine.decend(targetDirectory);
+        }
+        if( reCalculateChecksum ) {
+            sourceDirectory = null;
+            engine.decend(null);
+        }
+        if( extractTopDirectory ) {
+            engine.extract(sourceDirectory);
+        }
+        if( archiveTopDirectory ) {
+            engine.archive(sourceDirectory);
+        }
+    }
+}
