@@ -1,7 +1,12 @@
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.CopyOption;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.NoSuchElementException;
@@ -16,6 +21,11 @@ public class SearchEngine {
     private HashMap<Long, ArrayList<Integer>> bySize;
     private HashMap<String, ArrayList<Integer>> byCheckSum;
     private HashMap<String, ArrayList<Integer>> byTailPath;
+    private int usage;
+    private static int actionLevel = 0;
+
+    public void oneUsage() { usage++; }
+    public void reportUsage( PrintStream trace ) { if( trace != null ) trace.println("--- Loaded "+usage+" file checksum from the past library in "+topDirectory+".");}
 
     // Create a file record search engine for later adding and optionally saving them
     // to a file with a print stream.
@@ -29,6 +39,7 @@ public class SearchEngine {
         byCheckSum = new HashMap<String, ArrayList<Integer>>();
         if (result != null )
             result.println("-1," + separator);
+        usage = 0;
     }
 
     public int numberOfFiles() {
@@ -88,7 +99,7 @@ public class SearchEngine {
         }
     }
 
-    void loadFromFile(Scanner past) {
+    void loadFromFile(Scanner past, String childPrefixTailPath ) {
         String delim = ",|\r\n|\n";
         String lastfile = "None";
         Pattern delimPattern = Pattern.compile(delim);
@@ -113,7 +124,7 @@ public class SearchEngine {
                     if (x != null && x.length() > 0)
                         path = path + x; // This is to handle the case where there is a comma in the file name.
                     lastfile = path;
-                    FileRecord rec = new FileRecord(size, lastModifiedDate, hash, checkSum, path, 0);
+                    FileRecord rec = new FileRecord(size, lastModifiedDate, hash, checkSum, null==childPrefixTailPath?path:childPrefixTailPath+File.separator+path, FileRecord.NOCHANGE);
                     add(rec);
                 }
             } catch (NoSuchElementException e) {
@@ -137,36 +148,92 @@ public class SearchEngine {
         return numberOfExtracted;
     }
 
-    public int findUpdate(SearchEngine masterLibrary, PrintStream rpt)
+    public int carryOverFrom(SearchEngine archivePastLibrary )
     {
-        int numberOfExtracted = 0;
+        int numberOfCarried = 0;
+        for( int k=0; k<archivePastLibrary.allRecords.size(); ++k ) {
+            FileRecord rec = archivePastLibrary.allRecords.get(k);
+            if( rec.tag==FileRecord.NOCHANGE ) {
+                add(rec);
+                numberOfCarried++;
+            }
+        }
+        return numberOfCarried;
+    }
+
+    private boolean archiveOne( String masterTopDirectory, FileRecord mRec, SearchEngine newLibrary, PrintStream rpt, String prompt )
+    {
+        File m = new File( masterTopDirectory, mRec.tailPath );
+        File a = new File( newLibrary.topDirectory, mRec.tailPath );
+
+        switch (actionLevel) {
+        case 0:
+            (rpt==null?System.out:rpt).println("Copy " + prompt + " " + a.getAbsolutePath());
+            return false;
+        case 1:
+            System.out.print("From " + m.getAbsolutePath() + " to "+ a.getAbsolutePath() + ", type c(opy) to copy or skip : ");
+            String answer = (null==System.console()) ?
+                        "h" : System.console().readLine();
+            if( ! answer.startsWith("c") ) {
+                (rpt==null?System.out:rpt).println(answer+": not copy " + prompt + " " + a.getAbsolutePath());
+                return false;
+            }
+        case 2:
+            try {
+                File parent = a.getParentFile();
+                if( ! parent.exists() )
+                    parent.mkdirs();
+                Files.copy(m.toPath(), a.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                (rpt==null?System.out:rpt).println("Copied " + prompt + " " + a.getAbsolutePath());
+                mRec.markNew();
+                newLibrary.add(mRec);
+                return true;
+            } catch (Exception e) {
+                (rpt==null?System.out:rpt).println("Failure whiling copying to " + prompt + " " + a.getAbsolutePath());
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // Archive from master directory (source, this library) to archive directory (archive library), log activities in archive solution file.
+    public int archiveTo(SearchEngine archivePastLibrary, SearchEngine archiveNewLibrary, PrintStream rpt)
+    {
+        int numberOfArchived = 0;
+        actionLevel = Integer.valueOf(System.getProperty("MyCompare.ActionLevel"));
+
         for( int k=0; k<allRecords.size(); ++k )
         {
             FileRecord rec = allRecords.get(k);
-            FileRecord nRec = masterLibrary.findByTailPath(rec.tailPath);
-            if( null==nRec) {
-                // it's been deleted from master directory
-                rpt.println( "rem master version has deleted "+rec.tailPath);
+            FileRecord aRec = (null==archivePastLibrary?null:archivePastLibrary.findByTailPath(rec.tailPath));
+            if( null==aRec) {
+                // new file not in master
+                if( archiveOne( topDirectory, rec, archiveNewLibrary, rpt, "new file" ) )
+                    numberOfArchived++;
             } else {
-                if( rec.checksum.equalsIgnoreCase(nRec.checksum) )
+                if( rec.checksum.equalsIgnoreCase(aRec.checksum) )
                     // no change
+//                    archiveNewLibrary.add(aRec);
                     ;
-                else if( rec.lastModifiedDate < nRec.lastModifiedDate ) {
+                else if( rec.lastModifiedDate > aRec.lastModifiedDate ) {
                     // master has updated
-                    rpt.println("rem master has updated: " + rec.tailPath);
-                    rpt.println("copy \"" + masterLibrary.topDirectory + masterLibrary.separator + nRec.tailPath + "\" \"" + topDirectory + separator + rec.tailPath+"\"");
-                } else if( rec.lastModifiedDate == nRec.lastModifiedDate ) {
-                    // not modified
-                    rpt.println("rem checksumm differs but same time stamp: " + rec.tailPath);
-                    rpt.println("copy \"" + masterLibrary.topDirectory + masterLibrary.separator + nRec.tailPath + "\" \"" + topDirectory + separator + rec.tailPath+"\"");
-                } else {
+                    if( archiveOne( topDirectory, rec, archiveNewLibrary, rpt, "updated file" ) ) {
+                        numberOfArchived++;
+                        aRec.markInvalid();
+                    }
+                } else if( rec.lastModifiedDate == aRec.lastModifiedDate ) {
+                    if( archiveOne( topDirectory, rec, archiveNewLibrary, rpt, "same time updated file" ) ) {
+                        numberOfArchived++;
+                        aRec.markInvalid();
+                    }
+                } else { // rec.lastModifiedDate < aRec.lastModifiedDate
                     // archive has updated
-//                    rpt.println("rem archive has updated: " + rec.tailPath);
-                    rpt.println("rem checksumm differs but master version is earlier " + rec.tailPath);
+                    rpt.println("Archived file " + aRec.tailPath + "(" + (new Date(aRec.lastModifiedDate)).toString() +
+                            ") is newer (>) than master " + (new Date(rec.lastModifiedDate)).toString());
                 }
             }
         }
-        return numberOfExtracted;
+        return numberOfArchived;
     }
 
     public void reportStatus(PrintStream rpt )
@@ -177,17 +244,18 @@ public class SearchEngine {
             if( set.size() > 1 )
                 rpt.println( "File tail path  " + name + " has " + set.size() + " files");
         }
-        for ( Long size : bySize.keySet() ) {
-            ArrayList<Integer> set = bySize.get(size);
-            if( set.size() > 1 )
-                rpt.println( "File size " + size + " has " + set.size() + " files");
-        }
+        if( MyCompare.verbose )
+            for ( Long size : bySize.keySet() ) {
+                ArrayList<Integer> set = bySize.get(size);
+                if( set.size() > 1 )
+                    rpt.println( "File size " + size + " has " + set.size() + " files");
+            }
         for ( String cksum : byCheckSum.keySet() ) {
             ArrayList<Integer> set = byCheckSum.get(cksum);
             if( set.size() > 1 ) {
                 rpt.println("Checksum " + cksum + " has " + set.size() + " files");
                 for( int k=0; k<set.size(); ++k )
-                    rpt.println(allRecords.get(set.get(k)).toString(topDirectory));
+                    rpt.println(allRecords.get(set.get(k)).toString(topDirectory+File.separator));
             }
         }
     }

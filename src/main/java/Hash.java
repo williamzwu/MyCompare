@@ -3,6 +3,15 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 import java.security.MessageDigest;
 
+/*
+  Windows natively supports the calculation of the hash values or checksums for the following algorithm types: MD5, SHA1, SHA256, SHA384, SHA512, MACTripleDES, and RIPEMD160. You can easily find out the hash code of any file on your Windows 10 PC using a command line.
+  In powershell:
+    get-filehash -Algorithm [hash-type] filename
+  In Command line:
+    CertUtil -hashfile <path to file> [hash-type]
+
+  Ref: https://technastic.com/check-md5-checksum-hash/
+ */
 public enum Hash {
 
     MD5("MD5"),
